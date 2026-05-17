@@ -45,7 +45,7 @@ const Sidebar = ({isMenuOpen, setIsMenuOpen}) => {
               : chat.name.toLowerCase().includes(search.toLowerCase()),
           )
           .map((chat) => (
-            <div onClick={()=> {navigate('/'); setSelectedChat(chat); setIsMenuOpen(flase) }}
+            <div onClick={()=> {navigate('/'); setSelectedChat(chat); setIsMenuOpen(false) }}
               key={chat._id}
               className="p-2 px-4 dark:bg-[#57317C]/10 border border-gray-300 dark:border-[#80609F]/15 rounded-md cursor-pointer flex justify-between group "
             >
