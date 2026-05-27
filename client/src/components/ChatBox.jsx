@@ -19,35 +19,59 @@ const ChatBox = () => {
   const [isPublished, setIsPublished] = useState(false)
 
   const onSubmit = async (e) => {
-    
     try {
       e.preventDefault()
       if(!user) return toast('Login to send message')
-        setLoading(true)
-        const promptCopy = prompt
-        setPrompt('')
-        setMessages(prev => [...prev, {role: 'user', content: prompt, timestamp: Date.now(), isImage: false }])
+      if(!prompt.trim()) return
 
-        const {data} = await axios.post(`/api/message/${mode}`, {chatId: selectedChat._id, prompt, isPublished}, {headers: {Authorization: token}})
-        // R
-        console.log(data)
-
-        if(data.success){
-          setMessages(prev => [...prev, data.reply])
-          // decrease credits
-          if(mode === 'image'){
-            setUser(prev => ({...prev, credits: prev.credits - 2}))
-          } else {
-            setUser(prev => ({...prev, credits: prev.credits - 1}))
-          }
-        } else {
-          toast.error(data.message)
-          setPrompt(promptCopy)
-        }
-    } catch (error) {
-      toast.error(error.message)
-    } finally {
+      setLoading(true)
+      const promptCopy = prompt.trim()
       setPrompt('')
+
+      // Optimistically add user message to the UI
+      setMessages(prev => [...prev, {role: 'user', content: promptCopy, timestamp: Date.now(), isImage: false }])
+
+      const {data} = await axios.post(`/api/message/${mode}`, {
+        chatId: selectedChat._id,
+        prompt: promptCopy,
+        isPublished
+      }, {
+        headers: {Authorization: token},
+        timeout: mode === 'image' ? 120000 : 30000,
+      })
+
+      if(data.success){
+        setMessages(prev => [...prev, data.reply])
+        // Sync credit deduction locally
+        if(mode === 'image'){
+          setUser(prev => ({...prev, credits: prev.credits - 2}))
+        } else {
+          setUser(prev => ({...prev, credits: prev.credits - 1}))
+        }
+      } else {
+        // Restore prompt on failure so user can retry without retyping
+        setPrompt(promptCopy)
+        // Remove the optimistic user message
+        setMessages(prev => prev.slice(0, -1))
+
+        // Specific error messages for known error types
+        if (data.message && data.message.includes('quota')) {
+          toast.error('AI quota exhausted — please try again later or upgrade your plan.')
+        } else if (data.message && data.message.includes('credits')) {
+          toast.error('Not enough credits — purchase more from the Credits page.')
+        } else {
+          toast.error(data.message || 'Something went wrong. Please try again.')
+        }
+      }
+    } catch (error) {
+      // Network-level errors (timeout, server down, etc.)
+      const msg = error.code === 'ECONNABORTED'
+        ? 'Request timed out — image generation can take up to 2 minutes, please retry.'
+        : error.message || 'Network error. Please check your connection.'
+      toast.error(msg)
+      // Restore prompt on network error
+      setPrompt(prompt)
+    } finally {
       setLoading(false)
     }
   }
@@ -71,44 +95,63 @@ const ChatBox = () => {
   return (
     <div className='flex-1 flex flex-col justify-between m-5 md:m-10 xl:mx-30 max-md:mt-14 2xl:pr-40'>
       
-      {/* chat messages */}
+      {/* Chat messages container */}
       <div ref={containerRef} className='flex-1 mb-5 overflow-y-scroll'>
         {messages.length === 0 && (
-          <div className='h-full flex flex-col items-center justify-center gap-2 text-primary'>
-            <img src={theme === 'dark' ? assets.logo_full : assets.logo_full_dark} alt="" className='w-full max-w-56 sm:max-w-68' />
-            <p className='mt-5 text-4xl sm:text-6xl text-center text-gray-400 dark:text-white'>Ask me anything</p>
+          <div className='h-full flex flex-col items-center justify-center gap-2'>
+            <img src={theme === 'dark' ? assets.logo_full : assets.logo_full_dark} alt="QuickGPT" className='w-full max-w-56 sm:max-w-68' />
+            <p className='mt-5 text-4xl sm:text-6xl text-center text-gray-400 dark:text-white/60'>Ask me anything</p>
           </div>
         )}
       
         {messages.map((message, index)=> <Message key={index} message={message}/>)}
 
-        {/* Three Dot Loading  */}
-        {
-          loading && <div className='loader flex items-center gap-1.5'>
-            <div className='w-1.5 h-1.5 rounded-full bg-gray-500 dark:bg-white animate-bounce'></div>
-            <div className='w-1.5 h-1.5 rounded-full bg-gray-500 dark:bg-white animate-bounce'></div>
-            <div className='w-1.5 h-1.5 rounded-full bg-gray-500 dark:bg-white animate-bounce'></div>
+        {/* Three Dot Loading — shown while waiting for AI response */}
+        {loading && (
+          <div className='loader flex items-center gap-1.5 mt-2 p-2'>
+            <div className='w-2 h-2 rounded-full bg-gray-400 dark:bg-purple-400 animate-bounce'></div>
+            <div className='w-2 h-2 rounded-full bg-gray-400 dark:bg-purple-400 animate-bounce [animation-delay:0.15s]'></div>
+            <div className='w-2 h-2 rounded-full bg-gray-400 dark:bg-purple-400 animate-bounce [animation-delay:0.3s]'></div>
           </div>
-        }
+        )}
       </div>
 
-        {mode === 'image' && (
-          <label className='inline-flex items-center gap-2 mb-3 text-sm mx-auto'>
-            <p className='text-xs'>Publish Generated Image to Community</p>
-            <input type="checkbox" className='cursor-pointer' checked={isPublished} onChange={(e)=>setIsPublished(e.target.checked)} />
-          </label>
-        )}
+      {/* Publish to community checkbox (image mode only) */}
+      {mode === 'image' && (
+        <label className='inline-flex items-center gap-2 mb-3 text-sm mx-auto cursor-pointer'>
+          <p className='text-xs text-gray-600 dark:text-white/70'>Publish Generated Image to Community</p>
+          <input type="checkbox" className='cursor-pointer accent-purple-600' checked={isPublished} onChange={(e)=>setIsPublished(e.target.checked)} />
+        </label>
+      )}
 
       {/* Prompt Input Box */}
-      <form onSubmit={onSubmit} className='bg-primary/20 dark:bg-[#583C79]/30 border border-primary dark:border-[#80609F]/30 rounded-full w-full max-w-2xl p-3 pl-4 mx-auto flex gap-4 items-center'>
-        <select onChange={(e)=>setMode(e.target.value)} value={mode} className='text-sm pl-3 pr-2 outline-none'>
-          <option className='dark:bg-purple-900' value="text">Text</option>
-          <option className='dark:bg-purple-900' value="image">Image</option>
-
+      <form onSubmit={onSubmit} className='bg-primary/20 dark:bg-[#583C79]/30 border border-primary dark:border-[#80609F]/40 rounded-full w-full max-w-2xl p-3 pl-4 mx-auto flex gap-4 items-center'>
+        {/* Mode selector */}
+        <select
+          onChange={(e)=>setMode(e.target.value)}
+          value={mode}
+          className='text-sm pl-2 pr-1 outline-none bg-transparent text-gray-700 dark:text-white cursor-pointer'
+        >
+          <option className='bg-white dark:bg-purple-950 text-gray-800 dark:text-white' value="text">Text</option>
+          <option className='bg-white dark:bg-purple-950 text-gray-800 dark:text-white' value="image">Image</option>
         </select>
-        <input onChange={(e)=>setPrompt(e.target.value)} value={prompt} type="text" placeholder='Type your prompt here...' className='flex-1 w-full text-sm outline-none' required />
-        <button disabled={loading}>
-          <img src={loading ? assets.stop_icon : assets.send_icon} className='w-8 cursor-pointer' alt="" />
+
+        {/* Vertical divider */}
+        <div className='w-px h-5 bg-gray-300 dark:bg-white/20 shrink-0'></div>
+
+        {/* Prompt input */}
+        <input
+          onChange={(e)=>setPrompt(e.target.value)}
+          value={prompt}
+          type="text"
+          placeholder={mode === 'image' ? 'Describe the image to generate...' : 'Type your prompt here...'}
+          className='flex-1 w-full text-sm outline-none bg-transparent text-gray-800 dark:text-white placeholder:text-gray-400 dark:placeholder:text-white/40 caret-purple-600 dark:caret-white disabled:opacity-50'
+          disabled={loading}
+        />
+
+        {/* Send / Stop button */}
+        <button type="submit" disabled={loading} className='shrink-0 disabled:opacity-50'>
+          <img src={loading ? assets.stop_icon : assets.send_icon} className='w-8 cursor-pointer' alt={loading ? 'Stop' : 'Send'} />
         </button>
       </form>
     </div>

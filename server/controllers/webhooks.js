@@ -1,4 +1,4 @@
-import { response } from "express";
+// express import removed – 'response' was unused and could shadow the handler parameter
 import Stripe from "stripe";
 import Transaction from "../models/Transaction.js";
 import User from "../models/User.js";

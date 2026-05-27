@@ -31,7 +31,8 @@ const App = () => {
       )}
 
       {user ? (
-        <div className="dark:bg-gradient-to-b from-[#242124]/30 to-[#000000]/30 dark:text-white">
+        // Authenticated layout — dark gradient background covers entire viewport
+        <div className="min-h-screen bg-white dark:bg-gradient-to-b dark:from-[#1a1020] dark:to-[#0a0010] dark:text-white">
           <div className="flex h-screen w-screen">
             <Sidebar isMenuOpen={isMenuOpen} setIsMenuOpen={setIsMenuOpen} />
             <Routes>
@@ -43,8 +44,9 @@ const App = () => {
           </div>
         </div>
       ) : (
-        <div className="bg-gradient-to-b from-[#242124] to-[#000000] flex items-center justify-center h-screen w-screen">
-          <Login></Login>
+        // Login screen — full viewport with centered card
+        <div className="min-h-screen flex items-center justify-center bg-white dark:bg-gradient-to-b dark:from-[#1a1020] dark:to-[#0a0010]">
+          <Login />
         </div>
       )}
     </>

@@ -2,16 +2,16 @@ import axios from "axios";
 import Chat from "../models/Chat.js";
 import User from "../models/User.js";
 import imagekit from "../configs/imageKit.js";
-import openai from "../configs/openai.js";
+import { generateTextWithFallback } from "../configs/openai.js";
 
-// Text-based AI Chat Message Controller
+// ─── Text-based AI Chat Message Controller ────────────────────────────────────
 export const textMessageController = async (req, res) => {
   try {
-    // R
-    console.log("TEXT CONTROLLER HIT");
+    console.log("[textMessageController] HIT");
+
     const userId = req.user._id;
 
-    // Check credits
+    // Guard: credit check
     if (req.user.credits < 1) {
       return res.json({
         success: false,
@@ -20,11 +20,24 @@ export const textMessageController = async (req, res) => {
     }
 
     const { chatId, prompt } = req.body;
-    // R
-    console.log("CHAT ID:", chatId);
-console.log("PROMPT:", prompt);
+    console.log("[textMessageController] chatId:", chatId, "| prompt:", prompt);
 
+    if (!chatId || !prompt) {
+      return res
+        .status(400)
+        .json({ success: false, message: "chatId and prompt are required" });
+    }
+
+    // Guard: find chat safely — return 404 if not found
     const chat = await Chat.findOne({ userId, _id: chatId });
+    if (!chat) {
+      console.log("[textMessageController] Chat not found for id:", chatId);
+      return res
+        .status(404)
+        .json({ success: false, message: "Chat not found" });
+    }
+
+    // Push user message to chat history
     chat.messages.push({
       role: "user",
       content: prompt,
@@ -32,54 +45,100 @@ console.log("PROMPT:", prompt);
       isImage: false,
     });
 
-    const { choices } = await openai.chat.completions.create({
-      model: "gemini-1.5-flash",
-      messages: [
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-    });
+    // ── Call Gemini SDK with model fallback chain ─────────────────────────────
+    console.log("[textMessageController] Calling Gemini API...");
+    const responseText = await generateTextWithFallback(prompt);
+    console.log(
+      "[textMessageController] Gemini response received, length:",
+      responseText.length
+    );
 
+    // Build reply object (frontend-compatible shape)
     const reply = {
-      ...choices[0].message,
+      role: "assistant",
+      content: responseText,
       timestamp: Date.now(),
       isImage: false,
     };
-    res.json({ success: true, reply });
 
+    // Persist to MongoDB first, then respond (avoids double-header issues)
     chat.messages.push(reply);
     await chat.save();
     await User.updateOne({ _id: userId }, { $inc: { credits: -1 } });
-  } catch (error) {
-  console.log("FULL ERROR:", error);
-  console.log("ERROR RESPONSE:", error.response?.data);
+    console.log("[textMessageController] Chat saved and credit deducted.");
 
-  res.json({
-    success: false,
-    message: error.message,
-  });
-}
-  // catch (error) {
-  //   res.json({ success: false, message: error.message });
-  // }
+    return res.json({ success: true, reply });
+  } catch (error) {
+    console.error("[textMessageController] ERROR:", error.message || error);
+
+    // Detect quota exhaustion (429)
+    const statusCode =
+      error.status ||
+      error.statusCode ||
+      (error.response && error.response.status);
+
+    if (
+      statusCode === 429 ||
+      (error.message && error.message.includes("429"))
+    ) {
+      return res.status(429).json({
+        success: false,
+        message: "Gemini API quota exhausted. Please try again later.",
+      });
+    }
+
+    // Detect invalid/missing API key (400 or 403)
+    if (
+      statusCode === 400 ||
+      statusCode === 403 ||
+      (error.message &&
+        (error.message.toLowerCase().includes("api key") ||
+          error.message.toLowerCase().includes("api_key")))
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Invalid or missing Gemini API key. Check your .env configuration.",
+      });
+    }
+
+    return res.json({ success: false, message: error.message || "Internal server error" });
+  }
 };
 
-// Image Generation Message Controller
+// ─── Image Generation Message Controller ──────────────────────────────────────
+// Uses Pollinations.ai (free, no API key needed) to generate images,
+// then uploads the result to ImageKit media library for permanent hosting.
 export const imageMessageController = async (req, res) => {
   try {
+    console.log("[imageMessageController] HIT");
+
     const userId = req.user._id;
-    // Check credits
+
+    // Guard: credit check (image costs 2 credits)
     if (req.user.credits < 2) {
       return res.json({
         success: false,
         message: "You don't have enough credits to use this feature",
       });
     }
+
     const { prompt, chatId, isPublished } = req.body;
-    // Find chat
+
+    if (!chatId || !prompt) {
+      return res
+        .status(400)
+        .json({ success: false, message: "chatId and prompt are required" });
+    }
+
+    // Guard: find chat safely — return 404 if not found
     const chat = await Chat.findOne({ userId, _id: chatId });
+    if (!chat) {
+      console.log("[imageMessageController] Chat not found for id:", chatId);
+      return res
+        .status(404)
+        .json({ success: false, message: "Chat not found" });
+    }
 
     // Push user message
     chat.messages.push({
@@ -89,43 +148,88 @@ export const imageMessageController = async (req, res) => {
       isImage: false,
     });
 
-    // Encode the prompt
+    // ── Generate image via Pollinations.ai (free, no auth required) ───────────
     const encodedPrompt = encodeURIComponent(prompt);
+    const seed = Math.floor(Math.random() * 1000000);
+    const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=800&height=800&seed=${seed}&nologo=true`;
 
-    // Construct ImageKit AI generation URL
-    const generatedImageUrl = `${process.env.IMAGEKIT_URL_ENDPOINT}/ik-genimg-prompt-${encodedPrompt}/quickgpt/${Date.now()}.png?tr=w-800,h-800`;
+    console.log("[imageMessageController] Fetching image from Pollinations.ai...");
 
-    // Trigger generation by fetching from ImageKit
-    const aiImageResponse = await axios.get(generatedImageUrl, {
+    const aiImageResponse = await axios.get(pollinationsUrl, {
       responseType: "arraybuffer",
+      timeout: 60000, // 60s timeout — AI image generation can be slow
+      headers: {
+        "User-Agent": "QuickGPT/1.0",
+      },
     });
 
-    // Convert to Base64
-    const base64Image = `data:image/png;base64,${Buffer.from(aiImageResponse.data, "binary").toString("base64")}`;
+    console.log(
+      "[imageMessageController] Image fetched, size:",
+      aiImageResponse.data.byteLength,
+      "bytes | content-type:",
+      aiImageResponse.headers["content-type"]
+    );
 
-    // Upload to ImageKit Media Library
+    // Detect actual MIME type from response headers (Pollinations may return jpeg or png)
+    const contentType = aiImageResponse.headers["content-type"] || "image/jpeg";
+    const mimeType = contentType.split(";")[0].trim(); // strip any charset suffix
+    const ext = mimeType.includes("png") ? "png" : "jpg";
+
+    // Convert buffer to base64 data URI for ImageKit upload
+    const base64Image = `data:${mimeType};base64,${Buffer.from(
+      aiImageResponse.data
+    ).toString("base64")}`;
+
+    // Upload to ImageKit media library for permanent URL
     const uploadResponse = await imagekit.files.upload({
       file: base64Image,
-      fileName: `${Date.now()}.png`,
-      folder: "quickgpt",
+      fileName: `quickgpt-${Date.now()}.${ext}`,
+      folder: "/quickgpt",
     });
 
+    console.log("[imageMessageController] Image uploaded to ImageKit:", uploadResponse.url);
+
     const reply = {
-      role: 'assistant',
+      role: "assistant",
       content: uploadResponse.url,
       timestamp: Date.now(),
       isImage: true,
-      isPublished
+      isPublished: !!isPublished,
     };
-    res.json({ success: true, reply });
 
-    chat.messages.push(reply)
-    await chat.save()
-
+    // Persist to MongoDB first, then respond
+    chat.messages.push(reply);
+    await chat.save();
     await User.updateOne({ _id: userId }, { $inc: { credits: -2 } });
+    console.log("[imageMessageController] Chat saved and credits deducted.");
 
-
+    return res.json({ success: true, reply });
   } catch (error) {
-    res.json({success:false, message: error.message});
+    console.error("[imageMessageController] ERROR:", error.message || error);
+
+    const statusCode =
+      error.status ||
+      error.statusCode ||
+      (error.response && error.response.status);
+
+    // ImageKit auth / permission issue
+    if (statusCode === 403) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Image upload failed: ImageKit returned 403. Check IMAGEKIT_PUBLIC_KEY, IMAGEKIT_PRIVATE_KEY, and IMAGEKIT_URL_ENDPOINT in .env.",
+      });
+    }
+
+    // Timeout or network error from Pollinations
+    if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
+      return res.status(504).json({
+        success: false,
+        message:
+          "Image generation timed out. Please try again with a simpler prompt.",
+      });
+    }
+
+    return res.json({ success: false, message: error.message || "Internal server error" });
   }
 };
